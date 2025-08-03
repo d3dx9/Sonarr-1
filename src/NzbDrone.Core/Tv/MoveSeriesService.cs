@@ -5,6 +5,7 @@ using NLog;
 using NzbDrone.Common.Disk;
 using NzbDrone.Common.Extensions;
 using NzbDrone.Common.Instrumentation.Extensions;
+using NzbDrone.Core.MediaFiles;
 using NzbDrone.Core.Messaging.Commands;
 using NzbDrone.Core.Messaging.Events;
 using NzbDrone.Core.Organizer;
@@ -19,6 +20,7 @@ namespace NzbDrone.Core.Tv
         private readonly IBuildFileNames _filenameBuilder;
         private readonly IDiskProvider _diskProvider;
         private readonly IDiskTransferService _diskTransferService;
+        private readonly IConcurrentFileTransferService _concurrentFileTransferService;
         private readonly IEventAggregator _eventAggregator;
         private readonly Logger _logger;
 
@@ -26,6 +28,7 @@ namespace NzbDrone.Core.Tv
                                  IBuildFileNames filenameBuilder,
                                  IDiskProvider diskProvider,
                                  IDiskTransferService diskTransferService,
+                                 IConcurrentFileTransferService concurrentFileTransferService,
                                  IEventAggregator eventAggregator,
                                  Logger logger)
         {
@@ -33,11 +36,12 @@ namespace NzbDrone.Core.Tv
             _filenameBuilder = filenameBuilder;
             _diskProvider = diskProvider;
             _diskTransferService = diskTransferService;
+            _concurrentFileTransferService = concurrentFileTransferService;
             _eventAggregator = eventAggregator;
             _logger = logger;
         }
 
-        private void MoveSingleSeries(Series series, string sourcePath, string destinationPath, int? index = null, int? total = null)
+        private async Task MoveSingleSeriesAsync(Series series, string sourcePath, string destinationPath, int? index = null, int? total = null)
         {
             if (!sourcePath.IsPathValid(PathValidationType.CurrentOs))
             {
@@ -71,7 +75,9 @@ namespace NzbDrone.Core.Tv
                 // Ensure the parent of the series folder exists, this will often just be the root folder, but
                 // in cases where people are using subfolders for first letter (etc) it may not yet exist.
                 _diskProvider.CreateFolder(new DirectoryInfo(destinationPath).Parent.FullName);
-                _diskTransferService.TransferFolder(sourcePath, destinationPath, TransferMode.Move);
+                
+                // Use async transfer for better concurrency
+                await Task.Run(() => _diskTransferService.TransferFolder(sourcePath, destinationPath, TransferMode.Move));
 
                 _logger.ProgressInfo("{0} moved successfully to {1}", series.Title, destinationPath);
 
@@ -106,7 +112,7 @@ namespace NzbDrone.Core.Tv
 
             _logger.ProgressInfo("Moving {0} series to '{1}'", seriesToMove.Count, destinationRootFolder);
 
-            // Use async operations for better concurrency when moving multiple series
+            // Use async operations with controlled concurrency
             var tasks = new List<Task>();
 
             for (var index = 0; index < seriesToMove.Count; index++)
@@ -116,7 +122,7 @@ namespace NzbDrone.Core.Tv
                 var destinationPath = Path.Combine(destinationRootFolder, _filenameBuilder.GetSeriesFolder(series));
                 var currentIndex = index;
 
-                var task = Task.Run(() => MoveSingleSeries(series, s.SourcePath, destinationPath, currentIndex, seriesToMove.Count));
+                var task = MoveSingleSeriesAsync(series, s.SourcePath, destinationPath, currentIndex, seriesToMove.Count);
                 tasks.Add(task);
             }
 

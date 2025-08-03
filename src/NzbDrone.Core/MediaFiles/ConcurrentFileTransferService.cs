@@ -39,7 +39,7 @@ namespace NzbDrone.Core.MediaFiles
             {
                 _logger.Debug("Starting {0} operation: {1} -> {2}", mode, sourcePath, destinationPath);
 
-                await Task.Run(() => _diskTransferService.TransferFile(sourcePath, destinationPath, mode));
+                await _diskTransferService.TransferFileAsync(sourcePath, destinationPath, mode);
 
                 _logger.Debug("Completed {0} operation: {1} -> {2}", mode, sourcePath, destinationPath);
             }
