@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using NLog;
 using NzbDrone.Common.EnsureThat;
 using NzbDrone.Common.Extensions;
@@ -12,6 +13,10 @@ namespace NzbDrone.Common.Disk
     {
         TransferMode TransferFolder(string sourcePath, string targetPath, TransferMode mode);
         TransferMode TransferFile(string sourcePath, string targetPath, TransferMode mode, bool overwrite = false);
+
+        // New async method
+
+        Task<TransferMode> TransferFileAsync(string sourcePath, string targetPath, TransferMode mode, bool overwrite = false);
         int MirrorFolder(string sourcePath, string targetPath);
     }
 
@@ -389,6 +394,11 @@ namespace NzbDrone.Common.Disk
             }
 
             return TransferMode.None;
+        }
+
+        public Task<TransferMode> TransferFileAsync(string sourcePath, string targetPath, TransferMode mode, bool overwrite = false)
+        {
+            return Task.Run(() => TransferFile(sourcePath, targetPath, mode, overwrite));
         }
 
         private void ClearTargetPath(string sourcePath, string targetPath, bool overwrite)

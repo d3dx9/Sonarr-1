@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using NLog;
 using NzbDrone.Common.Disk;
 using NzbDrone.Common.Extensions;
@@ -104,14 +106,21 @@ namespace NzbDrone.Core.Tv
 
             _logger.ProgressInfo("Moving {0} series to '{1}'", seriesToMove.Count, destinationRootFolder);
 
+            // Use async operations for better concurrency when moving multiple series
+            var tasks = new List<Task>();
+
             for (var index = 0; index < seriesToMove.Count; index++)
             {
                 var s = seriesToMove[index];
                 var series = _seriesService.GetSeries(s.SeriesId);
                 var destinationPath = Path.Combine(destinationRootFolder, _filenameBuilder.GetSeriesFolder(series));
+                var currentIndex = index;
 
-                MoveSingleSeries(series, s.SourcePath, destinationPath, index, seriesToMove.Count);
+                var task = Task.Run(() => MoveSingleSeries(series, s.SourcePath, destinationPath, currentIndex, seriesToMove.Count));
+                tasks.Add(task);
             }
+
+            Task.WaitAll(tasks.ToArray());
 
             _logger.ProgressInfo("Finished moving {0} series to '{1}'", seriesToMove.Count, destinationRootFolder);
         }

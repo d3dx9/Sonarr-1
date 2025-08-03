@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using NLog;
 using NzbDrone.Common.Disk;
 using NzbDrone.Common.EnsureThat;
@@ -22,6 +23,8 @@ namespace NzbDrone.Core.MediaFiles
         EpisodeFile MoveEpisodeFile(EpisodeFile episodeFile, Series series);
         EpisodeFile MoveEpisodeFile(EpisodeFile episodeFile, LocalEpisode localEpisode);
         EpisodeFile CopyEpisodeFile(EpisodeFile episodeFile, LocalEpisode localEpisode);
+        Task<EpisodeFile> MoveEpisodeFileAsync(EpisodeFile episodeFile, LocalEpisode localEpisode);
+        Task<EpisodeFile> CopyEpisodeFileAsync(EpisodeFile episodeFile, LocalEpisode localEpisode);
     }
 
     public class EpisodeFileMovingService : IMoveEpisodeFiles
@@ -30,6 +33,7 @@ namespace NzbDrone.Core.MediaFiles
         private readonly IUpdateEpisodeFileService _updateEpisodeFileService;
         private readonly IBuildFileNames _buildFileNames;
         private readonly IDiskTransferService _diskTransferService;
+        private readonly IConcurrentFileTransferService _concurrentFileTransferService;
         private readonly IDiskProvider _diskProvider;
         private readonly IMediaFileAttributeService _mediaFileAttributeService;
         private readonly IImportScript _scriptImportDecider;
@@ -42,6 +46,7 @@ namespace NzbDrone.Core.MediaFiles
                                 IUpdateEpisodeFileService updateEpisodeFileService,
                                 IBuildFileNames buildFileNames,
                                 IDiskTransferService diskTransferService,
+                                IConcurrentFileTransferService concurrentFileTransferService,
                                 IDiskProvider diskProvider,
                                 IMediaFileAttributeService mediaFileAttributeService,
                                 IImportScript scriptImportDecider,
@@ -54,6 +59,7 @@ namespace NzbDrone.Core.MediaFiles
             _updateEpisodeFileService = updateEpisodeFileService;
             _buildFileNames = buildFileNames;
             _diskTransferService = diskTransferService;
+            _concurrentFileTransferService = concurrentFileTransferService;
             _diskProvider = diskProvider;
             _mediaFileAttributeService = mediaFileAttributeService;
             _scriptImportDecider = scriptImportDecider;
@@ -149,6 +155,100 @@ namespace NzbDrone.Core.MediaFiles
             else
             {
                 _diskTransferService.TransferFile(episodeFilePath, destinationFilePath, mode);
+            }
+
+            _updateEpisodeFileService.ChangeFileDateForFile(episodeFile, series, episodes);
+
+            try
+            {
+                _mediaFileAttributeService.SetFolderLastWriteTime(series.Path, episodeFile.DateAdded);
+
+                if (series.SeasonFolder)
+                {
+                    var seasonFolder = Path.GetDirectoryName(destinationFilePath);
+
+                    _mediaFileAttributeService.SetFolderLastWriteTime(seasonFolder, episodeFile.DateAdded);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Warn(ex, "Unable to set last write time");
+            }
+
+            _mediaFileAttributeService.SetFilePermissions(destinationFilePath);
+
+            return episodeFile;
+        }
+
+        public async Task<EpisodeFile> MoveEpisodeFileAsync(EpisodeFile episodeFile, LocalEpisode localEpisode)
+        {
+            var filePath = _buildFileNames.BuildFilePath(localEpisode.Episodes, localEpisode.Series, episodeFile, Path.GetExtension(localEpisode.Path), null, localEpisode.CustomFormats);
+
+            EnsureEpisodeFolder(episodeFile, localEpisode, filePath);
+
+            _logger.Debug("Moving episode file: {0} to {1}", episodeFile.Path, filePath);
+
+            return await TransferFileAsync(episodeFile, localEpisode.Series, localEpisode.Episodes, filePath, TransferMode.Move, localEpisode);
+        }
+
+        public async Task<EpisodeFile> CopyEpisodeFileAsync(EpisodeFile episodeFile, LocalEpisode localEpisode)
+        {
+            var filePath = _buildFileNames.BuildFilePath(localEpisode.Episodes, localEpisode.Series, episodeFile, Path.GetExtension(localEpisode.Path), null, localEpisode.CustomFormats);
+
+            EnsureEpisodeFolder(episodeFile, localEpisode, filePath);
+
+            if (_configService.CopyUsingHardlinks)
+            {
+                _logger.Debug("Attempting to hardlink episode file: {0} to {1}", episodeFile.Path, filePath);
+                return await TransferFileAsync(episodeFile, localEpisode.Series, localEpisode.Episodes, filePath, TransferMode.HardLinkOrCopy, localEpisode);
+            }
+
+            _logger.Debug("Copying episode file: {0} to {1}", episodeFile.Path, filePath);
+            return await TransferFileAsync(episodeFile, localEpisode.Series, localEpisode.Episodes, filePath, TransferMode.Copy, localEpisode);
+        }
+
+        private async Task<EpisodeFile> TransferFileAsync(EpisodeFile episodeFile, Series series, List<Episode> episodes, string destinationFilePath, TransferMode mode, LocalEpisode localEpisode = null)
+        {
+            Ensure.That(episodeFile, () => episodeFile).IsNotNull();
+            Ensure.That(series, () => series).IsNotNull();
+            Ensure.That(destinationFilePath, () => destinationFilePath).IsValidPath(PathValidationType.CurrentOs);
+
+            var episodeFilePath = episodeFile.Path ?? Path.Combine(series.Path, episodeFile.RelativePath);
+
+            if (!_diskProvider.FileExists(episodeFilePath))
+            {
+                throw new FileNotFoundException("Episode file path does not exist", episodeFilePath);
+            }
+
+            if (episodeFilePath == destinationFilePath)
+            {
+                throw new SameFilenameException("File not moved, source and destination are the same", episodeFilePath);
+            }
+
+            episodeFile.RelativePath = series.Path.GetRelativePath(destinationFilePath);
+
+            if (localEpisode is not null)
+            {
+                localEpisode.FileNameBeforeRename = episodeFile.RelativePath;
+            }
+
+            if (localEpisode is not null && _scriptImportDecider.TryImport(episodeFilePath, destinationFilePath, localEpisode, episodeFile, mode) is var scriptImportDecision && scriptImportDecision != ScriptImportDecision.DeferMove)
+            {
+                if (scriptImportDecision == ScriptImportDecision.RenameRequested)
+                {
+                    try
+                    {
+                        MoveEpisodeFile(episodeFile, series, episodeFile.Episodes);
+                    }
+                    catch (SameFilenameException)
+                    {
+                        _logger.Debug("No rename was required. File already exists at destination.");
+                    }
+                }
+            }
+            else
+            {
+                await _concurrentFileTransferService.TransferFileAsync(episodeFilePath, destinationFilePath, mode);
             }
 
             _updateEpisodeFileService.ChangeFileDateForFile(episodeFile, series, episodes);

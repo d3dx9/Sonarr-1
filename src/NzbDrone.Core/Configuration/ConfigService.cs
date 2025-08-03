@@ -402,6 +402,12 @@ namespace NzbDrone.Core.Configuration
             set { SetValue("TrustCgnatIpAddresses", value); }
         }
 
+        public int MaxConcurrentFileTransfers
+        {
+            get { return GetValueInt("MaxConcurrentFileTransfers", 2); }
+            set { SetValue("MaxConcurrentFileTransfers", value); }
+        }
+
         private string GetValue(string key)
         {
             return GetValue(key, string.Empty);

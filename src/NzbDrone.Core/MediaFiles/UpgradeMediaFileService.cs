@@ -1,5 +1,6 @@
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using NLog;
 using NzbDrone.Common.Disk;
 using NzbDrone.Common.Extensions;
@@ -11,6 +12,7 @@ namespace NzbDrone.Core.MediaFiles
     public interface IUpgradeMediaFiles
     {
         EpisodeFileMoveResult UpgradeEpisodeFile(EpisodeFile episodeFile, LocalEpisode localEpisode, bool copyOnly = false);
+        Task<EpisodeFileMoveResult> UpgradeEpisodeFileAsync(EpisodeFile episodeFile, LocalEpisode localEpisode, bool copyOnly = false);
     }
 
     public class UpgradeMediaFileService : IUpgradeMediaFiles
@@ -82,6 +84,59 @@ namespace NzbDrone.Core.MediaFiles
             else
             {
                 moveFileResult.EpisodeFile = _episodeFileMover.MoveEpisodeFile(episodeFile, localEpisode);
+            }
+
+            return moveFileResult;
+        }
+
+        public async Task<EpisodeFileMoveResult> UpgradeEpisodeFileAsync(EpisodeFile episodeFile, LocalEpisode localEpisode, bool copyOnly = false)
+        {
+            var moveFileResult = new EpisodeFileMoveResult();
+            var existingFiles = localEpisode.Episodes
+                                            .Where(e => e.EpisodeFileId > 0)
+                                            .Select(e => e.EpisodeFile.Value)
+                                            .Where(e => e != null)
+                                            .GroupBy(e => e.Id)
+                                            .ToList();
+
+            var rootFolder = _diskProvider.GetParentFolder(localEpisode.Series.Path);
+
+            // If there are existing episode files and the root folder is missing, throw, so the old file isn't left behind during the import process.
+            if (existingFiles.Any() && !_diskProvider.FolderExists(rootFolder))
+            {
+                throw new RootFolderNotFoundException($"Root folder '{rootFolder}' was not found.");
+            }
+
+            foreach (var existingFile in existingFiles)
+            {
+                var file = existingFile.First();
+                var episodeFilePath = Path.Combine(localEpisode.Series.Path, file.RelativePath);
+                var subfolder = rootFolder.GetRelativePath(_diskProvider.GetParentFolder(episodeFilePath));
+                string recycleBinPath = null;
+
+                if (_diskProvider.FileExists(episodeFilePath))
+                {
+                    _logger.Debug("Removing existing episode file: {0}", file);
+                    recycleBinPath = _recycleBinProvider.DeleteFile(episodeFilePath, subfolder);
+                }
+                else
+                {
+                    _logger.Warn("Existing episode file missing from disk: {0}", episodeFilePath);
+                }
+
+                moveFileResult.OldFiles.Add(new DeletedEpisodeFile(file, recycleBinPath));
+                _mediaFileService.Delete(file, DeleteMediaFileReason.Upgrade);
+            }
+
+            localEpisode.OldFiles = moveFileResult.OldFiles;
+
+            if (copyOnly)
+            {
+                moveFileResult.EpisodeFile = await _episodeFileMover.CopyEpisodeFileAsync(episodeFile, localEpisode);
+            }
+            else
+            {
+                moveFileResult.EpisodeFile = await _episodeFileMover.MoveEpisodeFileAsync(episodeFile, localEpisode);
             }
 
             return moveFileResult;
